@@ -5,7 +5,7 @@
 #include <openssl/ssl.h>
 #include <errno.h>
 
-//#define FORCE_SNI
+//#define FORCE_SNI //whether SNI is required to connect to this server.
 
 int ssl_init(void) {
 #if OPENSSL_VERSION_NUMBER>=0x10100000L
@@ -124,26 +124,26 @@ int sni_cb(SSL *ssl, int *ad, void *arg) {
   if(!ssl) return SSL_TLSEXT_ERR_NOACK;
   servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
   if(!servername || servername[0] == '\0') {
-    syslog(LOG_INFO,"no SNI");
+    syslog(LOG_DAEMON|LOG_DEBUG,"no SNI");
 #ifdef FORCE_SNI
     return SSL_TLSEXT_ERR_NOACK;
 #else
     return SSL_TLSEXT_ERR_OK;
 #endif
   }
-  syslog(LOG_INFO,"SNI: %s",servername);
+  syslog(LOG_DAEMON|LOG_DEBUG,"SNI: %s",servername);
   //TODO: figure out a good way to do certs based on vhost here.
   //probably attempt to open certs named after the vhosts in a config dir.
   return SSL_TLSEXT_ERR_OK;
 }
 
 int verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx) {
-  syslog(LOG_WARNING,"got into the varify_callback!");
+  syslog(LOG_DAEMON|LOG_DEBUG,"got into the varify_callback!");
   return 1;
 }
 
 int main(int argc,char *argv[]) {
-  syslog(LOG_INFO,"sslwrap started");
+  syslog(LOG_DAEMON|LOG_INFO,"started");
   int x;
   ssl_init();
   SSL_CTX *ctx;
@@ -152,7 +152,7 @@ int main(int argc,char *argv[]) {
   method=TLS_server_method();
   ctx = SSL_CTX_new(method);
   if(!ctx) {
-    syslog(LOG_INFO,"could not create new SSL context");
+    syslog(LOG_DAEMON|LOG_ERR,"could not create new SSL context");
     return 1;
   }
 
@@ -167,11 +167,11 @@ int main(int argc,char *argv[]) {
   SSL_CTX_set_ecdh_auto(ctx, 1);
 
   if(SSL_CTX_use_certificate_chain_file(ctx, argv[1]) <= 0) {
-    syslog(LOG_INFO,"failed to load cert chain file: %s",argv[1]);
+    syslog(LOG_DAEMON|LOG_ERR,"failed to load cert chain file: %s",argv[1]);
     return 1;
   }
   if(SSL_CTX_use_PrivateKey_file(ctx, argv[2], SSL_FILETYPE_PEM) <= 0) {
-    syslog(LOG_INFO,"failed to load private key file: %s",argv[2]);
+    syslog(LOG_DAEMON|LOG_ERR,"failed to load private key file: %s",argv[2]);
     return 1;
   }
 
@@ -182,24 +182,21 @@ int main(int argc,char *argv[]) {
   SSL_set_wfd(ssl, 1);//docs say "these are usually a nework connection"
 
   if(SSL_accept(ssl) <= 0) {
-    syslog(LOG_INFO,"sslwrap failed to accept");
+    syslog(LOG_DAEMON|LOG_WARNING,"failed to accept");//only warning because it could just be a port scan, I don't care about those that much.
     return 1;
   }
-  syslog(LOG_INFO,"sslwrap accepted a connection!");
-  //how do I auto-SSL_write stuff from another fd? I figure a select() block or something
+  syslog(LOG_DAEMON|LOG_DEBUG,"accepted a connection!");
   size_t r;
-  char buffer[9001]; //set it bigger thna a packet to hide the problem that I didn't write this problem.
-  // (at least until I get to rewriting it so it'll work however)
-  // can I exec into a subprocess? I doubt it... probably need to fork and wait so I can shutdown properly.
+  char buffer[9001];
 
   if(servername && servername[0]) {
     setenv("SSL_TLS_SNI",servername,1);
   }
 
   if(client_cert(ssl)) {
-    syslog(LOG_INFO,"we were provided a client cert!");
+    syslog(LOG_DAEMON|LOG_DEBUG,"we were provided a client cert!");
   } else {
-    syslog(LOG_INFO,"no client cert provided");
+    syslog(LOG_DAEMON|LOG_DEBUG,"no client cert provided");
   }
 
   argv+=3;
@@ -219,7 +216,7 @@ int main(int argc,char *argv[]) {
     execv(argv[0],argv);
   }
   if(child == -1) {
-    fprintf(stderr,"fork fucked\n");
+    syslog(LOG_DAEMON|LOG_WARNING,"failed to fork");
     return 1;
   }
   int j;
@@ -230,33 +227,40 @@ int main(int argc,char *argv[]) {
   FD_ZERO(&master);
   FD_ZERO(&readfs);
   FD_SET(0,&master);//SSL is ready to be read from
-  FD_SET(b[0],&master);//subprocess is ready to be read from
-  FD_SET(c[0],&master);
+  FD_SET(b[0],&master);//subprocess's stdout is ready to be read from
+  FD_SET(c[0],&master);//subprocess's stderr
   fdmax=b[0]>c[0]?b[0]:c[0];
   struct timeval *tout=NULL;
   close(a[0]);
   close(b[1]);
   close(c[1]);
-  syslog(LOG_INFO,"entering select loop");
+  syslog(LOG_DAEMON|LOG_DEBUG,"entering select loop");
   while(1) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
     readfs=master;
     if((j=select(fdmax+1,&readfs,0,0,tout)) == -1 ) {
-      syslog(LOG_INFO,"sslwrap error'd in select: %s",strerror(errno));
+      syslog(LOG_DAEMON|LOG_WARNING,"giving up. error'd in select: %s",strerror(errno));
+      break;
     }
     if(FD_ISSET(0,&readfs)) {
       if(SSL_read_ex(ssl,buffer,sizeof(buffer),&r) <= 0) break;
-      syslog(LOG_INFO,"read %d bytes from ssl!",r);
+        syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from ssl!",r);
+      if(r > 9000) {
+        syslog(LOG_DAEMON|LOG_WARNING,"read %d bytes from ssl, and that's close to the buffer size. watch for bugs.",r);
+      }
       write(a[1],buffer,r);
     }
     if(FD_ISSET(b[0],&readfs)) {
       if((r2=read(b[0],buffer,sizeof(buffer))) <= 0) break;
-      syslog(LOG_INFO,"read %d bytes from subprocess!",r2);
+      syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from subprocess!",r2);
+      if(r2 > 9000) {
+        syslog(LOG_DAEMON|LOG_WARNING,"read %d bytes from subprocess, and that's close to the buffer size. watch for bugs.",r2);
+      }
       SSL_write(ssl,buffer,r2);
     }
     if(FD_ISSET(c[0],&readfs)) {
       if((r2=read(c[0],buffer,sizeof(buffer)-1)) <= 0) break;
       buffer[r2]=0;//gotta null this off sice we're passing to something that expects a string.
-      syslog(LOG_WARNING,"stderr: %s",buffer);
+      syslog(LOG_DAEMON|LOG_WARNING,"stderr: %s",buffer);
     }
   }
   SSL_shutdown(ssl);
