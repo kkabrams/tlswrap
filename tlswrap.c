@@ -22,57 +22,50 @@ int ssl_init(void) {
   return 0;
 }
 
-void ssl_deinit() {
-  EVP_cleanup();
-}
-
 const char *servername;
 
 char *X509_NAME2text(X509_NAME *name) {
-    char *text;
-    BIO *bio;
-    int n;
-    bio=BIO_new(BIO_s_mem());
-    if(!bio)
-        return 0;
-    X509_NAME_print_ex(bio, name, 0,
-        XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB & ~XN_FLAG_SPC_EQ);
-    n=BIO_pending(bio);
-    text=malloc((size_t)n+1);
-    n=BIO_read(bio, text, n);
-    if(n<0) {
-        BIO_free(bio);
-        free(text);
-        return 0;
-    }
-    text[n]='\0';
+  char *text;
+  BIO *bio;
+  int n;
+  bio=BIO_new(BIO_s_mem());
+  if(!bio) return 0;
+  X509_NAME_print_ex(bio, name, 0, XN_FLAG_ONELINE & ~ASN1_STRFLGS_ESC_MSB & ~XN_FLAG_SPC_EQ);
+  n=BIO_pending(bio);
+  text=malloc((size_t)n+1);
+  n=BIO_read(bio, text, n);
+  if(n<0) {
     BIO_free(bio);
-    return text;
+    free(text);
+    return 0;
+  }
+  text[n]='\0';
+  BIO_free(bio);
+  return text;
 }
 
-int convert_ASN1TIME(ASN1_TIME *t, char* buf, size_t len)
-{
-        int rc;
-        BIO *b = BIO_new(BIO_s_mem());
-        rc = ASN1_TIME_print(b, t);
-        if (rc <= 0) {
-                BIO_free(b);
-                return EXIT_FAILURE;
-        }
-        rc = BIO_gets(b, buf, (int)len);//BIO_gets uses int for len I guess.
-        if (rc <= 0) {
-                BIO_free(b);
-                return EXIT_FAILURE;
-        }
-        BIO_free(b);
-        return EXIT_SUCCESS;
+int convert_ASN1TIME(ASN1_TIME *t, char* buf, size_t len) {
+  int rc;
+  BIO *b = BIO_new(BIO_s_mem());
+  rc = ASN1_TIME_print(b, t);
+  if (rc <= 0) {
+    BIO_free(b);
+    return EXIT_FAILURE;
+  }
+  rc = BIO_gets(b, buf, (int)len);//BIO_gets uses int for len I guess.
+  if (rc <= 0) {
+    BIO_free(b);
+    return EXIT_FAILURE;
+  }
+  BIO_free(b);
+  return EXIT_SUCCESS;
 }
 
 void hex_encode(unsigned char *readbuf,void *writebuf, size_t len) {
-    for(size_t i=0;i<len;i++) {
-        char *l = (char *) (2*i + ((intptr_t)writebuf));
-        sprintf(l,"%02x",readbuf[i]);
-    }
+  for(size_t i=0;i<len;i++) {
+    char *l = (char *) (2*i + ((intptr_t)writebuf));
+    sprintf(l,"%02x",readbuf[i]);
+  }
 }
 
 #define DATE_LEN 128
@@ -260,5 +253,5 @@ int main(int argc,char *argv[]) {
   //what do we do here?
   SSL_shutdown(ssl);
   SSL_free(ssl);
-  ssl_deinit();
+  EVP_cleanup();
 }
