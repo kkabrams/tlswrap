@@ -8,5 +8,5 @@ tlswrap: CFLAGS=-pedantic -Wall
 tlswrap: LDLIBS=-lssl -lcrypto
 tlswrap: tlswrap.c
 
-install:
+install: all
 	install -Dt $(PREFIX)/bin tlswrap

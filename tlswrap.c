@@ -158,8 +158,10 @@ int main(int argc,char *argv[]) {
 
   int a[2]; //a is subprocess's stdin, so need to read decrypted data from stdin and write to a[1]
   int b[2]; //b is subprocees's stdout, so need to read it, and give it to SSL to encrypt and push out.
+  int c[2]; //c is subprocess's stderr, so need to read it, and write lines to syslog.
   pipe(a);
   pipe(b);
+  pipe(c);
 
   SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_callback);
   SSL_CTX_set_ecdh_auto(ctx, 1);
@@ -206,12 +208,14 @@ int main(int argc,char *argv[]) {
     x=dup(0);
     dup2(a[0],0);
     dup2(b[1],1);
-    dup2(b[1],2);//probably log this instead of sending through the ssl socket
+    dup2(c[1],2);
     close(a[0]);
     close(b[1]);
     close(a[1]);
     close(b[0]);
-    dup2(x,3);
+    close(c[0]);
+    close(c[1]);
+    dup2(x,3);//we're passing this to the child ONLY so it can do getpeername and stuff.
     execv(argv[0],argv);
   }
   if(child == -1) {
@@ -227,12 +231,14 @@ int main(int argc,char *argv[]) {
   FD_ZERO(&readfs);
   FD_SET(0,&master);//SSL is ready to be read from
   FD_SET(b[0],&master);//subprocess is ready to be read from
-  fdmax=b[0];
+  FD_SET(c[0],&master);
+  fdmax=b[0]>c[0]?b[0]:c[0];
   struct timeval *tout=NULL;
-  close(b[1]);
   close(a[0]);
+  close(b[1]);
+  close(c[1]);
   syslog(LOG_INFO,"entering select loop");
-  while(1) { //a select() brick that reads from ssl and writes to subprocess. then reads from subprocess and writes to ssl
+  while(1) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
     readfs=master;
     if((j=select(fdmax+1,&readfs,0,0,tout)) == -1 ) {
       syslog(LOG_INFO,"sslwrap error'd in select: %s",strerror(errno));
@@ -243,14 +249,16 @@ int main(int argc,char *argv[]) {
       write(a[1],buffer,r);
     }
     if(FD_ISSET(b[0],&readfs)) {
-      r2=read(b[0],buffer,sizeof(buffer));
-      if(r2 <= 0) break;
+      if((r2=read(b[0],buffer,sizeof(buffer))) <= 0) break;
       syslog(LOG_INFO,"read %d bytes from subprocess!",r2);
       SSL_write(ssl,buffer,r2);
     }
+    if(FD_ISSET(c[0],&readfs)) {
+      if((r2=read(c[0],buffer,sizeof(buffer)-1)) <= 0) break;
+      buffer[r2]=0;//gotta null this off sice we're passing to something that expects a string.
+      syslog(LOG_WARNING,"stderr: %s",buffer);
+    }
   }
-
-  //what do we do here?
   SSL_shutdown(ssl);
   SSL_free(ssl);
   EVP_cleanup();
