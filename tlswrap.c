@@ -78,7 +78,7 @@ int client_cert(const SSL *ssl) {
   char not_before_str[DATE_LEN];
   char not_after_str[DATE_LEN];
   unsigned char client_hash_bin[SHA256LEN];
-  char client_hash_str[2*SHA256LEN+1];//two bytes for each byte and 1 null at the end
+  char client_hash_str[7+(2*SHA256LEN)+1]="sha256:";//7 for strlen("sha256:") and two bytes for each byte and 1 null at the end
   char *serial_str;
   unsigned int len;
   int rc;
@@ -107,7 +107,7 @@ int client_cert(const SSL *ssl) {
   }
 
   if((rc = X509_digest(peer_cert, digest, (unsigned char *)client_hash_bin, &len))) {
-    hex_encode(client_hash_bin, client_hash_str, SHA256LEN);
+    hex_encode(client_hash_bin, client_hash_str+7, SHA256LEN);// +7 because we want to skip the sha256: that is already in it.
     setenv("TLS_CLIENT_HASH",client_hash_str,1);
   }
 
