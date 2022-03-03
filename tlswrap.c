@@ -2,6 +2,11 @@
 #include <string.h>
 #include <time.h>
 #include <syslog.h>
+
+#include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+
 #include <openssl/ssl.h>
 #include <errno.h>
 
@@ -143,7 +148,23 @@ int verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx) {
 }
 
 int main(int argc,char *argv[]) {
-  syslog(LOG_DAEMON|LOG_INFO,"started");
+  syslog(LOG_DAEMON|LOG_DEBUG,"started");
+  struct sockaddr_in6 sa6;
+  char ra[NI_MAXHOST],rp[NI_MAXSERV];
+  char sa[NI_MAXHOST],sp[NI_MAXSERV];
+  unsigned int sl=sizeof(sa6);
+  if(getsockname(0,(struct sockaddr *)&sa6,&sl) != -1) {
+    if(getnameinfo((struct sockaddr *)&sa6,sl,sa,sizeof(sa),sp,sizeof(sp),NI_NUMERICHOST|NI_NUMERICSERV) == 0) {
+      setenv("SERVER_ADDR",sa,1);
+      setenv("SERVER_PORT",sp,1);
+    }
+  }
+  if(getpeername(0,(struct sockaddr *)&sa6,&sl) != -1) {
+    if(getnameinfo((struct sockaddr *)&sa6,sl,ra,sizeof(ra),rp,sizeof(rp),NI_NUMERICHOST|NI_NUMERICSERV) == 0) {
+      setenv("REMOTE_ADDR",ra,1);
+      setenv("REMOTE_PORT",rp,1);
+    }
+  }
   int x;
   ssl_init();
   SSL_CTX *ctx;
@@ -182,7 +203,8 @@ int main(int argc,char *argv[]) {
   SSL_set_wfd(ssl, 1);//docs say "these are usually a nework connection"
 
   if(SSL_accept(ssl) <= 0) {
-    syslog(LOG_DAEMON|LOG_WARNING,"failed to accept");//only warning because it could just be a port scan, I don't care about those that much.
+    syslog(LOG_DAEMON|LOG_WARNING,"tcp://%s:%s -> tcp://%s:%s SSL_accept() failed",ra,rp,sa,sp);
+    //only warning because it could just be a port scan, I don't care about those that much.
     return 1;
   }
   syslog(LOG_DAEMON|LOG_DEBUG,"accepted a connection!");
@@ -194,9 +216,9 @@ int main(int argc,char *argv[]) {
   }
 
   if(client_cert(ssl)) {
-    syslog(LOG_DAEMON|LOG_DEBUG,"we were provided a client cert!");
+    syslog(LOG_DAEMON|LOG_DEBUG,"tcp://%s:%s -> tcp://%s:%s we were provided a client cert!",ra,rp,sa,sp);
   } else {
-    syslog(LOG_DAEMON|LOG_DEBUG,"no client cert provided");
+    syslog(LOG_DAEMON|LOG_DEBUG,"tcp://%s:%s -> tcp://%s:%s no client cert provided",ra,rp,sa,sp);
   }
 
   argv+=3;
