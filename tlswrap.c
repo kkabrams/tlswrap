@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 
 #include <openssl/ssl.h>
+#include <openssl/err.h>
 #include <errno.h>
 
 //#define FORCE_SNI //whether SNI is required to connect to this server.
@@ -199,12 +200,11 @@ int main(int argc,char *argv[]) {
   SSL_CTX_set_tlsext_servername_callback(ctx,sni_cb);
   ssl = SSL_new(ctx);
 
-  SSL_set_rfd(ssl, 0);//this is right
-  SSL_set_wfd(ssl, 1);//docs say "these are usually a nework connection"
+  SSL_set_rfd(ssl, 0);
+  SSL_set_wfd(ssl, 1);
 
   if(SSL_accept(ssl) <= 0) {
-    syslog(LOG_DAEMON|LOG_WARNING,"tcp://%s:%s -> tcp://%s:%s SSL_accept() failed",ra,rp,sa,sp);
-    //only warning because it could just be a port scan, I don't care about those that much.
+    syslog(LOG_DAEMON|LOG_WARNING,"tcp://%s:%s -> tcp://%s:%s SSL_accept() failed. %s",ra,rp,sa,sp,ERR_error_string(ERR_get_error(),NULL));
     return 1;
   }
   syslog(LOG_DAEMON|LOG_DEBUG,"accepted a connection!");
