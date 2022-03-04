@@ -153,17 +153,31 @@ int main(int argc,char *argv[]) {
   struct sockaddr_in6 sa6;
   char ra[NI_MAXHOST],rp[NI_MAXSERV];
   char sa[NI_MAXHOST],sp[NI_MAXSERV];
+  char ru[6+3+NI_MAXHOST+NI_MAXSERV+1];//6 for "tcp://", 3 just in case [ and ] are needed and the :, +1 for null
+  char su[6+3+NI_MAXHOST+NI_MAXSERV+1];
   unsigned int sl=sizeof(sa6);
   if(getsockname(0,(struct sockaddr *)&sa6,&sl) != -1) {
     if(getnameinfo((struct sockaddr *)&sa6,sl,sa,sizeof(sa),sp,sizeof(sp),NI_NUMERICHOST|NI_NUMERICSERV) == 0) {
       setenv("SERVER_ADDR",sa,1);
       setenv("SERVER_PORT",sp,1);
+      if(sa6.sin6_family == AF_INET6) {
+        snprintf(su,sizeof(su)-1,"tcp://[%s]:%s",sa,sp);
+      } else {
+        snprintf(su,sizeof(su)-1,"tcp://%s:%s",sa,sp);
+      }
+      setenv("SERVER_URL",su,1);
     }
   }
   if(getpeername(0,(struct sockaddr *)&sa6,&sl) != -1) {
     if(getnameinfo((struct sockaddr *)&sa6,sl,ra,sizeof(ra),rp,sizeof(rp),NI_NUMERICHOST|NI_NUMERICSERV) == 0) {
       setenv("REMOTE_ADDR",ra,1);
       setenv("REMOTE_PORT",rp,1);
+      if(sa6.sin6_family == AF_INET6) {
+        snprintf(ru,sizeof(ru)-1,"tcp://[%s]:%s",ra,rp);
+      } else {
+        snprintf(ru,sizeof(ru)-1,"tcp://%s:%s",ra,rp);
+      }
+      setenv("REMOTE_URL",ru,1);
     }
   }
   int x;
@@ -204,7 +218,7 @@ int main(int argc,char *argv[]) {
   SSL_set_wfd(ssl, 1);
 
   if(SSL_accept(ssl) <= 0) {
-    syslog(LOG_DAEMON|LOG_WARNING,"tcp://%s:%s -> tcp://%s:%s SSL_accept() failed. %s",ra,rp,sa,sp,ERR_error_string(ERR_get_error(),NULL));
+    syslog(LOG_DAEMON|LOG_NOTICE,"%s -> %s SSL_accept() failed. %s",ru,su,ERR_error_string(ERR_get_error(),NULL));
     return 1;
   }
   syslog(LOG_DAEMON|LOG_DEBUG,"accepted a connection!");
@@ -216,9 +230,9 @@ int main(int argc,char *argv[]) {
   }
 
   if(client_cert(ssl)) {
-    syslog(LOG_DAEMON|LOG_DEBUG,"tcp://%s:%s -> tcp://%s:%s we were provided a client cert!",ra,rp,sa,sp);
+    syslog(LOG_DAEMON|LOG_DEBUG,"%s -> %s we were provided a client cert!",ru,su);
   } else {
-    syslog(LOG_DAEMON|LOG_DEBUG,"tcp://%s:%s -> tcp://%s:%s no client cert provided",ra,rp,sa,sp);
+    syslog(LOG_DAEMON|LOG_DEBUG,"%s -> %s no client cert provided",ru,su);
   }
 
   argv+=3;
@@ -257,32 +271,38 @@ int main(int argc,char *argv[]) {
   close(b[1]);
   close(c[1]);
   syslog(LOG_DAEMON|LOG_DEBUG,"entering select loop");
-  while(1) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
+  for(;FD_ISSET(b[0],&master) && FD_ISSET(c[0],&master);) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
     readfs=master;
     if((j=select(fdmax+1,&readfs,0,0,tout)) == -1 ) {
-      syslog(LOG_DAEMON|LOG_WARNING,"giving up. error'd in select: %s",strerror(errno));
+      syslog(LOG_DAEMON|LOG_ERR,"giving up. error'd in select");
       break;
     }
     if(FD_ISSET(0,&readfs)) {
-      if(SSL_read_ex(ssl,buffer,sizeof(buffer),&r) <= 0) break;
-        syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from ssl!",r);
-      if(r > 9000) {
-        syslog(LOG_DAEMON|LOG_WARNING,"read %d bytes from ssl, and that's close to the buffer size. watch for bugs.",r);
+      if(SSL_read_ex(ssl,buffer,sizeof(buffer),&r) <= 0) {
+        syslog(LOG_DAEMON|LOG_DEBUG,"SSL done.");
+	FD_CLR(0,&master);
+        continue;
       }
+      syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from ssl!",r);
       write(a[1],buffer,r);
     }
     if(FD_ISSET(b[0],&readfs)) {
-      if((r2=read(b[0],buffer,sizeof(buffer))) <= 0) break;
-      syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from subprocess!",r2);
-      if(r2 > 9000) {
-        syslog(LOG_DAEMON|LOG_WARNING,"read %d bytes from subprocess, and that's close to the buffer size. watch for bugs.",r2);
+      if((r2=read(b[0],buffer,sizeof(buffer))) <= 0) {
+        syslog(LOG_DAEMON|LOG_DEBUG,"subprocess stdout done.");
+	FD_CLR(b[0],&master);
+	continue;
       }
+      syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from subprocess!",r2);
       SSL_write(ssl,buffer,r2);
     }
     if(FD_ISSET(c[0],&readfs)) {
-      if((r2=read(c[0],buffer,sizeof(buffer)-1)) <= 0) break;
+      if((r2=read(c[0],buffer,sizeof(buffer)-1)) <= 0) {
+        syslog(LOG_DAEMON|LOG_DEBUG,"subprocess stderr done.");
+	FD_CLR(c[0],&master);
+        continue;
+      }
       buffer[r2]=0;//gotta null this off sice we're passing to something that expects a string.
-      syslog(LOG_DAEMON|LOG_WARNING,"stderr: %s",buffer);
+      syslog(LOG_DAEMON|LOG_WARNING,"%s -> %s stderr: %s",ru,su,buffer);
     }
   }
   SSL_shutdown(ssl);
