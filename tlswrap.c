@@ -271,38 +271,48 @@ int main(int argc,char *argv[]) {
   close(b[1]);
   close(c[1]);
   syslog(LOG_DAEMON|LOG_DEBUG,"entering select loop");
-  for(;FD_ISSET(b[0],&master) && FD_ISSET(c[0],&master);) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
+  for(;FD_ISSET(b[0],&master) || FD_ISSET(c[0],&master);) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
     readfs=master;
     if((j=select(fdmax+1,&readfs,0,0,tout)) == -1 ) {
       syslog(LOG_DAEMON|LOG_ERR,"giving up. error'd in select");
       break;
     }
     if(FD_ISSET(0,&readfs)) {
-      if(SSL_read_ex(ssl,buffer,sizeof(buffer),&r) <= 0) {
-        syslog(LOG_DAEMON|LOG_DEBUG,"SSL done.");
-	FD_CLR(0,&master);
-        continue;
+      if((r=SSL_read(ssl,buffer,sizeof(buffer))) <= 0) {
+        syslog(LOG_DAEMON|LOG_ERR,"SSL done. %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
+	if(r > 0) {//we can get done and data at the same time I guess?
+          if(write(a[1],buffer,r) < 0) {
+            syslog(LOG_DAEMON|LOG_ERR,"write failed. -_-");
+	  }
+	}
+        FD_CLR(0,&master);
+      } else {
+        syslog(LOG_DAEMON|LOG_ERR,"SSL read? %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
+        syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from ssl!",r);
+        if(write(a[1],buffer,r) < 0) {
+          syslog(LOG_DAEMON|LOG_ERR,"a write failed. -_-");
+        }
       }
-      syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from ssl!",r);
-      write(a[1],buffer,r);
     }
     if(FD_ISSET(b[0],&readfs)) {
       if((r2=read(b[0],buffer,sizeof(buffer))) <= 0) {
         syslog(LOG_DAEMON|LOG_DEBUG,"subprocess stdout done.");
-	FD_CLR(b[0],&master);
-	continue;
+        FD_CLR(b[0],&master);
+      } else {
+        syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from subprocess!",r2);
+        while(SSL_write(ssl,buffer,r2) <= 0) {
+          syslog(LOG_DAEMON|LOG_ERR,"SSL_write had an error: %s",ERR_error_string(ERR_get_error(),NULL));
+        }
       }
-      syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from subprocess!",r2);
-      SSL_write(ssl,buffer,r2);
     }
     if(FD_ISSET(c[0],&readfs)) {
       if((r2=read(c[0],buffer,sizeof(buffer)-1)) <= 0) {
         syslog(LOG_DAEMON|LOG_DEBUG,"subprocess stderr done.");
-	FD_CLR(c[0],&master);
-        continue;
+        FD_CLR(c[0],&master);
+      } else {
+        buffer[r2]=0;//gotta null this off sice we're passing to something that expects a string.
+        syslog(LOG_DAEMON|LOG_WARNING,"%s -> %s stderr: %s",ru,su,buffer);
       }
-      buffer[r2]=0;//gotta null this off sice we're passing to something that expects a string.
-      syslog(LOG_DAEMON|LOG_WARNING,"%s -> %s stderr: %s",ru,su,buffer);
     }
   }
   SSL_shutdown(ssl);
