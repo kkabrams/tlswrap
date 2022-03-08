@@ -279,7 +279,7 @@ int main(int argc,char *argv[]) {
     }
     if(FD_ISSET(0,&readfs)) {
       if((r=SSL_read(ssl,buffer,sizeof(buffer))) <= 0) {
-        syslog(LOG_DAEMON|LOG_ERR,"SSL done. %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
+        syslog(LOG_DAEMON|LOG_DEBUG,"SSL done. %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
 	if(r > 0) {//we can get done and data at the same time I guess?
           if(write(a[1],buffer,r) < 0) {
             syslog(LOG_DAEMON|LOG_ERR,"write failed. -_-");
@@ -287,7 +287,7 @@ int main(int argc,char *argv[]) {
 	}
         FD_CLR(0,&master);
       } else {
-        syslog(LOG_DAEMON|LOG_ERR,"SSL read? %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
+        syslog(LOG_DAEMON|LOG_DEBUG,"SSL read? %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
         syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from ssl!",r);
         if(write(a[1],buffer,r) < 0) {
           syslog(LOG_DAEMON|LOG_ERR,"a write failed. -_-");
