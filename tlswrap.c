@@ -13,6 +13,25 @@
 
 //#define FORCE_SNI //whether SNI is required to connect to this server.
 
+const char *SSL_error_string(int e) {
+  switch(e) {
+    case SSL_ERROR_NONE: return "SSL_ERROR_NONE";
+    case SSL_ERROR_ZERO_RETURN: return "SSL_ERROR_ZERO_RETURN";
+    case SSL_ERROR_WANT_READ: return "SSL_ERROR_WANT_READ";
+    case SSL_ERROR_WANT_WRITE: return "SSL_ERROR_WANT_WRITE";
+    case SSL_ERROR_WANT_CONNECT: return "SSL_ERROR_WANT_CONNECT";
+    case SSL_ERROR_WANT_ACCEPT: return "SSL_ERROR_WANT_ACCEPT";
+    case SSL_ERROR_WANT_X509_LOOKUP: return "SSL_ERROR_WANT_X509_LOOKUP";
+    case SSL_ERROR_WANT_ASYNC: return "SSL_ERROR_WANT_ASYNC";
+    case SSL_ERROR_WANT_ASYNC_JOB: return "SSL_ERROR_WANT_ASYNC_JOB";
+    case SSL_ERROR_WANT_CLIENT_HELLO_CB: return "SSL_ERROR_WANT_CLIENT_HELLO_CB";
+    case SSL_ERROR_SYSCALL: return "SSL_ERROR_SYSCALL";
+    case SSL_ERROR_SSL: return "SSL_ERROR_SSL";
+    default: return "unknown error";
+  }
+  return "impossible.";
+}
+
 int ssl_init(void) {
 #if OPENSSL_VERSION_NUMBER>=0x10100000L
   OPENSSL_init_ssl(
@@ -22,6 +41,7 @@ int ssl_init(void) {
       , NULL);
 #else
   OPENSSL_config(NULL);
+  ERR_load_crypto_strings();
   SSL_load_error_strings();
   SSL_library_init();
 #endif
@@ -128,6 +148,7 @@ int client_cert(const SSL *ssl) {
 //what is ad and arg?
 int sni_cb(SSL *ssl, int *ad, void *arg) {
   if(!ssl) return SSL_TLSEXT_ERR_NOACK;
+  //SSL_CTX *ctx=SSL_get_SSL_CTX(ssl);
   servername = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
   if(!servername || servername[0] == '\0') {
     syslog(LOG_DAEMON|LOG_DEBUG,"no SNI");
@@ -138,13 +159,28 @@ int sni_cb(SSL *ssl, int *ad, void *arg) {
 #endif
   }
   syslog(LOG_DAEMON|LOG_DEBUG,"SNI: %s",servername);
+  return SSL_TLSEXT_ERR_OK;
   //TODO: figure out a good way to do certs based on vhost here.
+  if(chdir("/etc/ssl/certs/") != 0) {
+    return SSL_TLSEXT_ERR_OK;//skipping per-vhost certs and keys
+  }
+  //if(SSL_CTX_use_certificate_chain_file(ctx, servername) <= 0) {
+  //  syslog(LOG_DAEMON|LOG_ERR,"failed to load servername cert");
+  //  return SSL_TLSEXT_ERR_NOACK;
+ // }
+  if(chdir("/etc/ssl/keys/") != 0) {
+    return SSL_TLSEXT_ERR_OK;//not sure if returning here will break stuff or not
+  }
+  //if(SSL_CTX_use_PrivateKey_file(ctx, servername, SSL_FILETYPE_PEM) <= 0) {
+  //  syslog(LOG_DAEMON|LOG_ERR,"failed to load servername key");
+  //  return SSL_TLSEXT_ERR_NOACK;
+ // }
   //probably attempt to open certs named after the vhosts in a config dir.
   return SSL_TLSEXT_ERR_OK;
 }
 
 int verify_callback(int preverify_ok, X509_STORE_CTX *x509_ctx) {
-  syslog(LOG_DAEMON|LOG_DEBUG,"got into the varify_callback!");
+  syslog(LOG_DAEMON|LOG_DEBUG,"got into the verify_callback!");
   return 1;
 }
 
@@ -156,6 +192,46 @@ int main(int argc,char *argv[]) {
   char ru[6+3+NI_MAXHOST+NI_MAXSERV+1];//6 for "tcp://", 3 just in case [ and ] are needed and the :, +1 for null
   char su[6+3+NI_MAXHOST+NI_MAXSERV+1];
   unsigned int sl=sizeof(sa6);
+  char *cert_chain_file, *priv_key_file;
+  int verify_mode = SSL_VERIFY_PEER;
+
+  argv++;//skip argv[0]
+  argc--;
+
+  if(argc == 0
+    || !strcmp(argv[0],"--help")
+    || !strcmp(argv[0],"-h")) {
+    fprintf(argc?stdout:stderr,"usage: tlswrap [--help|-h][--verify-mode integer] <cert_chain_file> <priv_key_file> <absolute_path_to_exe> [<arg1>] [<arg2>] [...]\n");
+    fprintf(argc?stdout:stderr,"verify mode flags (can be or'd together):\n");
+    fprintf(argc?stdout:stderr,"SSL_VERIFY_NONE: %d (no other flags may be set)\n",SSL_VERIFY_NONE);
+    fprintf(argc?stdout:stderr,"SSL_VERIFY_PEER: %d\n",SSL_VERIFY_PEER);
+    fprintf(argc?stdout:stderr,"SSL_VERIFY_FAIL_IF_NO_PEER_CERT: %d\n",SSL_VERIFY_FAIL_IF_NO_PEER_CERT);
+    fprintf(argc?stdout:stderr,"SSL_VERIFY_CLIENT_ONCE: %d\n",SSL_VERIFY_CLIENT_ONCE);
+    fprintf(argc?stdout:stderr,"SSL_VERIFY_POST_HANDSHAKE: %d\n",SSL_VERIFY_POST_HANDSHAKE);
+    return 1;
+  }
+  if(argc >= 2) {
+    if(!strcmp(argv[0],"--verify-mode")) {
+      verify_mode=atoi(argv[1]);
+      argc-=2;
+      argv+=2;
+    }
+  }
+  if(argc >= 1) {
+    cert_chain_file=argv[0];
+    argv++;
+    argc--;
+  }
+  if(argc >= 1) {
+    priv_key_file=argv[0];
+    argv++;
+    argc--;
+  }
+  if(argc == 0) {
+    fprintf(stderr,"missing argument. need the absolute path of an executable and arguments to execv into at the end.\n");
+    return 1;
+  }
+
   if(getsockname(0,(struct sockaddr *)&sa6,&sl) != -1) {
     if(getnameinfo((struct sockaddr *)&sa6,sl,sa,sizeof(sa),sp,sizeof(sp),NI_NUMERICHOST|NI_NUMERICSERV) == 0) {
       setenv("SERVER_ADDR",sa,1);
@@ -199,15 +275,14 @@ int main(int argc,char *argv[]) {
   pipe(b);
   pipe(c);
 
-  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_callback);
-  SSL_CTX_set_ecdh_auto(ctx, 1);
+  SSL_CTX_set_verify(ctx, verify_mode, verify_callback); SSL_CTX_set_ecdh_auto(ctx, 1);
 
-  if(SSL_CTX_use_certificate_chain_file(ctx, argv[1]) <= 0) {
-    syslog(LOG_DAEMON|LOG_ERR,"failed to load cert chain file: %s",argv[1]);
+  if(SSL_CTX_use_certificate_chain_file(ctx, cert_chain_file) <= 0) {
+    syslog(LOG_DAEMON|LOG_ERR,"failed to load cert chain file: %s",cert_chain_file);
     return 1;
   }
-  if(SSL_CTX_use_PrivateKey_file(ctx, argv[2], SSL_FILETYPE_PEM) <= 0) {
-    syslog(LOG_DAEMON|LOG_ERR,"failed to load private key file: %s",argv[2]);
+  if(SSL_CTX_use_PrivateKey_file(ctx, priv_key_file, SSL_FILETYPE_PEM) <= 0) {
+    syslog(LOG_DAEMON|LOG_ERR,"failed to load private key file: %s",priv_key_file);
     return 1;
   }
 
@@ -216,11 +291,43 @@ int main(int argc,char *argv[]) {
 
   SSL_set_rfd(ssl, 0);
   SSL_set_wfd(ssl, 1);
+  int err;
+  int ssl_err;
+  int err_err;
+  //fprintf(stderr,"made it here\n");
+  if((err=SSL_accept(ssl)) <= 0) {
+    ssl_err = SSL_get_error(ssl,err); //this value should NOT get passed to ERR_error_string.
+    if(ssl_err == SSL_ERROR_SYSCALL) {
+      if(errno == 0) {
+        //The SSL_ERROR_SYSCALL with errno value of 0 indicates unexpected EOF from the peer.
+        //ignore this error by default. not really that interesting.
+        syslog(LOG_DAEMON|LOG_NOTICE,"%s -> %s SSL_accept() failed. %s",ru,su,strerror(errno));
+        return 1;
+      }
+      if(errno == 104) { //connection reset by peer. also not interesting.
+        syslog(LOG_DAEMON|LOG_NOTICE,"%s -> %s SSL_accept() failed. %s",ru,su,strerror(errno));
+        return 1;
+      }
+    }
+    //now, let's try harder on these error messages.
+    err_err = ERR_get_error(); //???
 
-  if(SSL_accept(ssl) <= 0) {
-    syslog(LOG_DAEMON|LOG_NOTICE,"%s -> %s SSL_accept() failed. %s",ru,su,ERR_error_string(ERR_get_error(),NULL));
+    syslog(LOG_DAEMON|LOG_ERR,"%s -> %s SSL_accept() failed. %d / %d / %d / %s / %s / %d / %s",
+      ru,
+      su,
+      err,
+      ssl_err,
+      err_err,
+      ERR_error_string(err_err,NULL),
+      SSL_error_string(ssl_err),
+      errno,
+      strerror(errno)
+    );
+    //syslog(LOG_DAEMON|LOG_NOTICE,"%s -> %s SSL_accept() failed. %s",ru,su,ERR_error_string(ERR_get_error(),NULL));
+    //fprintf(stderr,"SSL_accept() failed. %s\n",ERR_lib_error_string(SSL_get_error(ssl,err)));
     return 1;
   }
+  //fprintf(stderr,"made it here\n");
   syslog(LOG_DAEMON|LOG_DEBUG,"accepted a connection!");
   size_t r;
   char buffer[9001];
@@ -234,8 +341,8 @@ int main(int argc,char *argv[]) {
   } else {
     syslog(LOG_DAEMON|LOG_DEBUG,"%s -> %s no client cert provided",ru,su);
   }
+  //fprintf(stderr,"made it here\n");
 
-  argv+=3;
   int child=fork();
   if(child == 0) {
     x=dup(0);
@@ -248,13 +355,14 @@ int main(int argc,char *argv[]) {
     close(b[0]);
     close(c[0]);
     close(c[1]);
-    dup2(x,3);//we're passing this to the child ONLY so it can do getpeername and stuff.
+    dup2(x,3);//we're passing this to the child ONLY so it can do getpeername and stuff. this can probably be closed.
     execv(argv[0],argv);
   }
   if(child == -1) {
     syslog(LOG_DAEMON|LOG_WARNING,"failed to fork");
     return 1;
   }
+  //fprintf(stderr,"made it here\n");
   int j;
   int r2;
   int fdmax=0;
@@ -271,6 +379,7 @@ int main(int argc,char *argv[]) {
   close(b[1]);
   close(c[1]);
   syslog(LOG_DAEMON|LOG_DEBUG,"entering select loop");
+  //fprintf(stderr,"made it here\n");
   for(;FD_ISSET(b[0],&master) || FD_ISSET(c[0],&master);) { //a select() brick that reads from ssl and writes to subprocess and reads from subprocess and writes to ssl
     readfs=master;
     if((j=select(fdmax+1,&readfs,0,0,tout)) == -1 ) {
@@ -280,11 +389,9 @@ int main(int argc,char *argv[]) {
     if(FD_ISSET(0,&readfs)) {
       if((r=SSL_read(ssl,buffer,sizeof(buffer))) <= 0) {
         syslog(LOG_DAEMON|LOG_DEBUG,"SSL done. %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
-	if(r > 0) {//we can get done and data at the same time I guess?
-          if(write(a[1],buffer,r) < 0) {
-            syslog(LOG_DAEMON|LOG_ERR,"write failed. -_-");
-	  }
-	}
+        if(write(a[1],buffer,r) < 0) {
+          syslog(LOG_DAEMON|LOG_ERR,"write failed. -_-");
+        }
         FD_CLR(0,&master);
       } else {
         syslog(LOG_DAEMON|LOG_DEBUG,"SSL read? %d msg: %s",r,ERR_error_string(ERR_get_error(),NULL));
@@ -300,7 +407,7 @@ int main(int argc,char *argv[]) {
         FD_CLR(b[0],&master);
       } else {
         syslog(LOG_DAEMON|LOG_DEBUG,"read %d bytes from subprocess!",r2);
-        while(SSL_write(ssl,buffer,r2) <= 0) {
+        if(SSL_write(ssl,buffer,r2) <= 0) {
           syslog(LOG_DAEMON|LOG_ERR,"SSL_write had an error: %s",ERR_error_string(ERR_get_error(),NULL));
         }
       }
@@ -310,7 +417,9 @@ int main(int argc,char *argv[]) {
         syslog(LOG_DAEMON|LOG_DEBUG,"subprocess stderr done.");
         FD_CLR(c[0],&master);
       } else {
+        //write(2,buffer,r2);
         buffer[r2]=0;//gotta null this off sice we're passing to something that expects a string.
+        //fprintf(stderr,"%s",buffer);
         syslog(LOG_DAEMON|LOG_WARNING,"%s -> %s stderr: %s",ru,su,buffer);
       }
     }
